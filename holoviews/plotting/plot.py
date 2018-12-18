@@ -24,9 +24,9 @@ from ..element import Table, Graph
 from ..util.transform import dim
 from .util import (get_dynamic_mode, initialize_unbounded, dim_axis_label,
                    attach_streams, traverse_setter, get_nested_streams,
-                   compute_overlayable_zorders, get_plot_frame,
+                   compute_overlayable_zorders, get_nested_plot_frame,
                    split_dmap_overlay, get_axis_padding, get_range,
-                   get_minimum_span)
+                   get_minimum_span, get_plot_frame)
 
 
 class Plot(param.Parameterized):
@@ -203,9 +203,11 @@ class DimensionedPlot(Plot):
     show_title = param.Boolean(default=True, doc="""
         Whether to display the plot title.""")
 
-    title_format = param.String(default="{label} {group}\n{dimensions}", doc="""
+    title = param.String(default="{label} {group}\n{dimensions}", doc="""
         The formatting string for the title of this plot, allows defining
         a label group separator and dimension labels.""")
+
+    title_format = param.String(default=None, doc="Alias for title.")
 
     normalize = param.Boolean(default=True, doc="""
         Whether to compute ranges across all Elements at this level
@@ -242,7 +244,6 @@ class DimensionedPlot(Plot):
         self.comm = comm
         self._force = False
         self._updated = False # Whether the plot should be marked as updated
-
         params = {k: v for k, v in params.items()
                   if k in self.params()}
         super(DimensionedPlot, self).__init__(**params)
@@ -611,12 +612,16 @@ class DimensionedPlot(Plot):
                     for d, k in zip(self.dimensions, key))
         stream_key = util.wrap_tuple_streams(key, self.dimensions, self.streams)
 
-        # Update if not top-level, batched or an ElementPlot
-        if not self.top_level or isinstance(self, GenericElementPlot):
-            self.update(stream_key)
-
+        self._trigger_refresh(stream_key)
         if self.comm is not None and self.top_level:
             self.push()
+
+
+    def _trigger_refresh(self, key):
+        "Triggers update to a plot on a refresh event"
+        # Update if not top-level, batched or an ElementPlot
+        if not self.top_level or isinstance(self, GenericElementPlot):
+            self.update(key)
 
 
     def push(self):
@@ -866,7 +871,7 @@ class GenericElementPlot(DimensionedPlot):
         elif key == self.current_key and not self._force:
             return self.current_frame
 
-        cached = self.current_key is None
+        cached = self.current_key is None and not any(s._triggering for s in self.streams)
         key_map = dict(zip([d.name for d in self.dimensions], key))
         frame = get_plot_frame(self.hmap, key_map, cached)
         traverse_setter(self, '_force', False)
@@ -1075,7 +1080,13 @@ class GenericElementPlot(DimensionedPlot):
                 dim_title = self._frame_title(key, separator=separator)
             else:
                 dim_title = ''
-            title_format = util.bytes_to_unicode(self.title_format)
+
+            custom_title = (self.title != self.param.params('title').default)
+            if custom_title and self.title_format:
+                self.warning('Both title and title_format set. Using title_format parameter')
+
+            title = self.title if custom_title or self.title_format is None else self.title_format
+            title_format = util.bytes_to_unicode(title)
             title = title_format.format(label=util.bytes_to_unicode(label),
                                         group=util.bytes_to_unicode(group),
                                         type=type_name,
@@ -1460,8 +1471,7 @@ class GenericCompositePlot(DimensionedPlot):
 
         key_map = dict(zip([d.name for d in self.dimensions], key))
         for path, item in self.layout.items():
-            frame = item.map(lambda x: get_plot_frame(x, key_map, cached=cached),
-                             ['DynamicMap', 'HoloMap'])
+            frame = get_nested_plot_frame(item, key_map, cached)
             if frame is not None:
                 layout_frame[path] = frame
         traverse_setter(self, '_force', False)
@@ -1476,10 +1486,17 @@ class GenericCompositePlot(DimensionedPlot):
         type_name = type(self.layout).__name__
         group = util.bytes_to_unicode(layout.group if layout.group != type_name else '')
         label = util.bytes_to_unicode(layout.label)
-        title = util.bytes_to_unicode(self.title_format).format(label=label,
-                                                                group=group,
-                                                                type=type_name,
-                                                                dimensions=dim_title)
+
+
+        custom_title = (self.title != self.param.params('title').default)
+        if custom_title and self.title_format:
+            self.warning('Both title and title_format set. Using title parameter')
+        title_str = self.title if custom_title or self.title_format is None else self.title_format
+
+        title = util.bytes_to_unicode(title_str).format(label=label,
+                                                        group=group,
+                                                        type=type_name,
+                                                        dimensions=dim_title)
         return title.strip(' \n')
 
 

@@ -44,7 +44,8 @@ import numpy as np
 import param
 from .tree import AttrTree
 from .util import sanitize_identifier, group_sanitizer,label_sanitizer, basestring
-from .pprint import InfoPrinter
+from .util import deprecated_opts_signature, disable_constant, config
+from .pprint import InfoPrinter, PrettyPrinter
 
 
 class SkipRendering(Exception):
@@ -56,6 +57,123 @@ class SkipRendering(Exception):
     def __init__(self, message="", warn=True):
         self.warn = warn
         super(SkipRendering, self).__init__(message)
+
+
+class Opts(object):
+
+    def __init__(self, obj, mode=None):
+        self.mode = mode
+        self.obj = obj
+
+
+    def __call__(self, *args, **kwargs):
+        """Applies nested options definition.
+
+        Applies options on an object or nested group of objects in a
+        flat format. Unlike the .options method, .opts modifies the
+        options in place by default. If the options are to be set
+        directly on the object a simple format may be used, e.g.:
+
+            obj.opts(cmap='viridis', show_title=False)
+
+        If the object is nested the options must be qualified using
+        a type[.group][.label] specification, e.g.:
+
+            obj.opts('Image', cmap='viridis', show_title=False)
+
+        or using:
+
+            obj.opts({'Image': dict(cmap='viridis', show_title=False)})
+
+        Args:
+            *args: Sets of options to apply to object
+                Supports a number of formats including lists of Options
+                objects, a type[.group][.label] followed by a set of
+                keyword options to apply and a dictionary indexed by
+                type[.group][.label] specs.
+            backend (optional): Backend to apply options to
+                Defaults to current selected backend
+            clone (bool, optional): Whether to clone object
+                Options can be applied in place with clone=False
+            **kwargs: Keywords of options
+                Set of options to apply to the object
+
+        For backwards compatibility, this method also supports the
+        option group semantics now offered by the hv.opts.apply_groups
+        utility. This usage will be deprecated and for more
+        information see the apply_options_type docstring.
+
+        Returns:
+            Returns the object or a clone with the options applied
+        """
+        if self.mode is None:
+            return self._base_opts(*args, **kwargs)
+        elif self.mode == 'holomap':
+            return self._holomap_opts(*args, **kwargs)
+        elif self.mode == 'dynamicmap':
+            return self._dynamicmap_opts(*args, **kwargs)
+
+    def clear(self, clone=False):
+        return self.obj.opts(clone=clone)
+
+    def show(self):
+        pprinter = PrettyPrinter(show_options=True)
+        print(pprinter.pprint(self.obj))
+
+    def _holomap_opts(self, *args, **kwargs):
+        clone = kwargs.pop('clone', None)
+        apply_groups, _, _ = deprecated_opts_signature(args, kwargs)
+        data = OrderedDict([(k, v.opts(*args, **kwargs))
+                             for k, v in self.obj.data.items()])
+
+        # By default do not clone in .opts method
+        if (apply_groups if clone is None else clone):
+            return self.obj.clone(data)
+        else:
+            self.obj.data = data
+            return self.obj
+
+    def _dynamicmap_opts(self, *args, **kwargs):
+        from ..util import Dynamic
+
+        clone = kwargs.get('clone', None)
+        apply_groups, _, _ = deprecated_opts_signature(args, kwargs)
+        # By default do not clone in .opts method
+        clone = (apply_groups if clone is None else clone)
+
+        obj = self.obj if clone else self.obj.clone()
+        dmap = Dynamic(obj, operation=lambda obj, **dynkwargs: obj.opts(*args, **kwargs),
+                       streams=self.obj.streams, link_inputs=True)
+        if not clone:
+            with disable_constant(self.obj):
+                obj.callback = self.obj.callback
+                self.obj.callback = dmap.callback
+            dmap = self.obj
+            dmap.data = OrderedDict([(k, v.opts(*args, **kwargs))
+                                     for k, v in self.obj.data.items()])
+        return dmap
+
+
+    def _base_opts(self, *args, **kwargs):
+        apply_groups, options, new_kwargs = deprecated_opts_signature(args, kwargs)
+
+        # By default do not clone in .opts method
+        clone = kwargs.get('clone', None)
+
+        if apply_groups and config.future_deprecations:
+            msg = ("Calling the .opts method with options broken down by options "
+                   "group (i.e. separate plot, style and norm groups) is deprecated. "
+                   "Use the .options method converting to the simplified format "
+                   "instead or use hv.opts.apply_groups for backward compatibility.")
+            param.main.warning(msg)
+        if apply_groups:
+            from ..util import opts
+            if options is not None:
+                kwargs['options'] = options
+            return opts.apply_groups(self.obj, **dict(kwargs, **new_kwargs))
+
+        kwargs['clone'] = False if clone is None else clone
+        return self.obj.options(*args, **kwargs)
 
 
 class OptionError(Exception):
@@ -244,7 +362,7 @@ class Cycle(param.Parameterized):
     attribute.
     """
 
-    key = param.String(default='default_colors', doc="""
+    key = param.String(default='default_colors', allow_None=True, doc="""
        The key in the default_cycles dictionary used to specify the
        color cycle if values is not supplied. """)
 
@@ -259,6 +377,7 @@ class Cycle(param.Parameterized):
                 params['key'] = cycle
             else:
                 params['values'] = cycle
+                params['key'] = None
         super(Cycle, self).__init__(**params)
         self.values = self._get_values()
 
@@ -285,8 +404,13 @@ class Cycle(param.Parameterized):
 
 
     def __repr__(self):
-        return "%s(values=%s)" % (type(self).__name__,
-                                  [str(el) for el in self.values])
+        if self.key == self.param.params('key').default:
+            vrepr = ''
+        elif self.key:
+            vrepr = repr(self.key)
+        else:
+            vrepr = [str(el) for el in self.values]
+        return "%s(%s)" % (type(self).__name__, vrepr)
 
 
 
@@ -680,7 +804,7 @@ class OptionTree(AttrTree):
         return item if mode == 'node' else item.path
 
 
-    def closest(self, obj, group):
+    def closest(self, obj, group, defaults=True):
         """
         This method is designed to be called from the root of the
         tree. Given any LabelledData object, this method will return
@@ -693,11 +817,12 @@ class OptionTree(AttrTree):
                       group_sanitizer(obj.group),
                       label_sanitizer(obj.label))
         target = '.'.join([c for c in components if c])
-        return self.find(components).options(group, target=target)
+        return self.find(components).options(group, target=target,
+                                             defaults=defaults)
 
 
 
-    def options(self, group, target=None):
+    def options(self, group, target=None, defaults=True):
         """
         Using inheritance up to the root, get the complete Options
         object for the given node and the specified group.
@@ -706,7 +831,7 @@ class OptionTree(AttrTree):
             target = self.path
         if self.groups.get(group, None) is None:
             return None
-        if self.parent is None and target and (self is not Store.options()):
+        if self.parent is None and target and (self is not Store.options()) and defaults:
             root_name = self.__class__.__name__
             replacement = root_name + ('' if len(target) == len(root_name) else '.')
             option_key = target.replace(replacement,'')
@@ -718,8 +843,8 @@ class OptionTree(AttrTree):
         elif self.parent is None:
             return self.groups[group]
 
-        return Options(**dict(self.parent.options(group,target=target).kwargs,
-                              **self.groups[group].kwargs))
+        parent_opts = self.parent.options(group,target, defaults)
+        return Options(**dict(parent_opts.kwargs, **self.groups[group].kwargs))
 
     def __repr__(self):
         """
@@ -1175,12 +1300,14 @@ class Store(object):
 
 
     @classmethod
-    def lookup_options(cls, backend, obj, group):
+    def lookup_options(cls, backend, obj, group, defaults=True):
         # Current custom_options dict may not have entry for obj.id
         if obj.id in cls._custom_options[backend]:
-            return cls._custom_options[backend][obj.id].closest(obj, group)
+            return cls._custom_options[backend][obj.id].closest(obj, group, defaults)
+        elif defaults:
+            return cls._options[backend].closest(obj, group, defaults)
         else:
-            return cls._options[backend].closest(obj, group)
+            return OptionTree(groups=cls._options[backend].groups)
 
     @classmethod
     def lookup(cls, backend, obj):

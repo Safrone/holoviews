@@ -10,25 +10,28 @@ import param
 from bokeh.layouts import gridplot
 from bokeh.models import (ColumnDataSource, Column, Row, Div)
 from bokeh.models.widgets import Panel, Tabs
-from bokeh.plotting.helpers import _known_tools as known_tools
 
-from ...core import (OrderedDict, Store, AdjointLayout, NdLayout, Layout,
-                     Empty, GridSpace, HoloMap, Element, DynamicMap)
+from ...core import (
+    OrderedDict, Store, AdjointLayout, NdLayout, Layout, Empty,
+    GridSpace, HoloMap, Element, DynamicMap
+)
 from ...core.options import SkipRendering
-from ...core.util import (basestring, wrap_tuple, unique_iterator,
-                          get_method_owner, wrap_tuple_streams)
+from ...core.util import (
+    basestring, cftime_to_timestamp, cftime_types, get_method_owner,
+    unique_iterator, wrap_tuple, wrap_tuple_streams, _STANDARD_CALENDARS)
 from ...streams import Stream
 from ..links import Link
-from ..plot import (DimensionedPlot, GenericCompositePlot, GenericLayoutPlot,
-                    GenericElementPlot, GenericOverlayPlot)
+from ..plot import (
+    DimensionedPlot, GenericCompositePlot, GenericLayoutPlot,
+    GenericElementPlot, GenericOverlayPlot
+)
 from ..util import attach_streams, displayable, collate
 from .callbacks import LinkCallback
-from .util import (layout_padding, pad_plots, filter_toolboxes, make_axis,
-                   update_shared_sources, empty_plot, decode_bytes,
-                   theme_attr_json, cds_column_replace)
-
-TOOLS = {name: tool if isinstance(tool, basestring) else type(tool())
-         for name, tool in known_tools.items()}
+from .util import (
+    TOOL_TYPES, layout_padding, pad_plots, filter_toolboxes,
+    make_axis, update_shared_sources, empty_plot, decode_bytes,
+    theme_attr_json, cds_column_replace
+)
 
 
 class BokehPlot(DimensionedPlot):
@@ -70,9 +73,11 @@ class BokehPlot(DimensionedPlot):
         share their Bokeh data source allowing for linked brushing
         and other linked behaviors.""")
 
-    title_format = param.String(default="{label} {group} {dimensions}", doc="""
+    title = param.String(default="{label} {group} {dimensions}", doc="""
         The formatting string for the title of this plot, allows defining
         a label group separator and dimension labels.""")
+
+    title_format = param.String(default=None, doc="Alias for title.")
 
     toolbar = param.ObjectSelector(default='above',
                                    objects=["above", "below",
@@ -226,8 +231,31 @@ class BokehPlot(DimensionedPlot):
         """
         Initializes a data source to be passed into the bokeh glyph.
         """
-        data = {k: decode_bytes(vs) for k, vs in data.items()}
+        data = self._postprocess_data(data)
         return ColumnDataSource(data=data)
+
+
+    def _postprocess_data(self, data):
+        """
+        Applies necessary type transformation to the data before
+        it is set on a ColumnDataSource.
+        """
+        new_data = {}
+        for k, values in data.items():
+            values = decode_bytes(values) # Bytes need decoding to strings
+
+            # Certain datetime types need to be converted
+            if len(values) and isinstance(values[0], cftime_types):
+                if any(v.calendar not in _STANDARD_CALENDARS for v in values):
+                    self.param.warning(
+                        'Converting cftime.datetime from a non-standard '
+                        'calendar (%s) to a standard calendar for plotting. '
+                        'This may lead to subtle errors in formatting '
+                        'dates, for accurate tick formatting switch to '
+                        'the matplotlib backend.' % values[0].calendar)
+                values = cftime_to_timestamp(values, 'ms')
+            new_data[k] = values
+        return new_data
 
 
     def _update_datasource(self, source, data):
@@ -237,7 +265,7 @@ class BokehPlot(DimensionedPlot):
         if not self.document:
             return
 
-        data = {k: decode_bytes(vs) for k, vs in data.items()}
+        data = self._postprocess_data(data)
         empty = all(len(v) == 0 for v in data.values())
         if (self.streaming and self.streaming[0].data is self.current_frame.data
             and self._stream_data and not empty):
@@ -260,7 +288,7 @@ class BokehPlot(DimensionedPlot):
         the root level bokeh model.
         """
         subplots = self.traverse(lambda x: x, [GenericElementPlot])
-        merged_tools = {t: list(plot.select({'type': TOOLS[t]}))
+        merged_tools = {t: list(plot.select({'type': TOOL_TYPES[t]}))
                         for t in self._merged_tools}
         for subplot in subplots:
             for cb in subplot.callbacks:

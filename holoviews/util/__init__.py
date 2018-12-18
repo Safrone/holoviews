@@ -69,6 +69,11 @@ class opts(param.ParameterizedFunction):
 
     __original_docstring__ = None
 
+    # Keywords not to be tab-completed (helps with deprecation)
+    _no_completion = ['title_format', 'color_index', 'size_index', 'finalize_hooks',
+                      'scaling_factor', 'scaling_method', 'size_fn', 'normalize_lengths',
+                      'group_index', 'category_index', 'stack_index', 'color_by']
+
     strict = param.Boolean(default=False, doc="""
        Whether to be strict about the options specification. If not set
        to strict (default), any invalid keywords are simply skipped. If
@@ -95,19 +100,107 @@ class opts(param.ParameterizedFunction):
 
             self._cellmagic(args[0], args[1])
 
+
     @classmethod
-    def _process_magic(cls, options, strict):
+    def apply_groups(cls, obj, options=None, backend=None, clone=True, **kwargs):
+        """Applies nested options definition grouped by type.
+
+        Applies options on an object or nested group of objects,
+        returning a new object with the options applied. This method
+        accepts the separate option namespaces explicitly (i.e 'plot',
+        'style' and 'norm').
+
+        If the options are to be set directly on the object a
+        simple format may be used, e.g.:
+
+            opts.apply_groups(obj, style={'cmap': 'viridis'},
+                                         plot={'show_title': False})
+
+        If the object is nested the options must be qualified using
+        a type[.group][.label] specification, e.g.:
+
+            opts.apply_groups(obj, {'Image': {'plot':  {'show_title': False},
+                                                    'style': {'cmap': 'viridis}}})
+
+        If no opts are supplied all options on the object will be reset.
+
+        Args:
+            options (dict): Options specification
+                Options specification should be indexed by
+                type[.group][.label] or option type ('plot', 'style',
+                'norm').
+            backend (optional): Backend to apply options to
+                Defaults to current selected backend
+            clone (bool, optional): Whether to clone object
+                Options can be applied inplace with clone=False
+            **kwargs: Keywords of options by type
+                Applies options directly to the object by type
+                (e.g. 'plot', 'style', 'norm') specified as
+                dictionaries.
+
+        Returns:
+            Returns the object or a clone with the options applied
+        """
+        backend = backend or Store.current_backend
+        if isinstance(options, basestring):
+            from ..util.parser import OptsSpec
+            try:
+                options = OptsSpec.parse(options)
+            except SyntaxError:
+                options = OptsSpec.parse(
+                    '{clsname} {options}'.format(clsname=obj.__class__.__name__,
+                                                 options=options))
+
+        backend_options = Store.options(backend=backend)
+        groups = set(backend_options.groups.keys())
+        if kwargs and set(kwargs) <= groups:
+            if not all(isinstance(v, dict) for v in kwargs.values()):
+                raise Exception("The %s options must be specified using dictionary groups" %
+                                ','.join(repr(k) for k in kwargs.keys()))
+
+            # Check whether the user is specifying targets (such as 'Image.Foo')
+            entries = backend_options.children
+            targets = [k.split('.')[0] in entries for grp in kwargs.values() for k in grp]
+            if any(targets) and not all(targets):
+                raise Exception("Cannot mix target specification keys such as 'Image' with non-target keywords.")
+            elif not any(targets):
+                # Not targets specified - add current object as target
+                sanitized_group = util.group_sanitizer(obj.group)
+                if obj.label:
+                    identifier = ('%s.%s.%s' % (
+                        obj.__class__.__name__, sanitized_group,
+                        util.label_sanitizer(obj.label)))
+                elif  sanitized_group != obj.__class__.__name__:
+                    identifier = '%s.%s' % (obj.__class__.__name__, sanitized_group)
+                else:
+                    identifier = obj.__class__.__name__
+
+                kwargs = {k:{identifier:v} for k,v in kwargs.items()}
+
+        obj_handle = obj
+        if options is None and kwargs == {}:
+            if clone:
+                obj_handle = obj.map(lambda x: x.clone(id=None))
+            else:
+                obj.map(lambda x: setattr(x, 'id', None))
+        elif clone:
+            obj_handle = obj.map(lambda x: x.clone(id=x.id))
+        StoreOptions.set_options(obj_handle, options, backend=backend, **kwargs)
+        return obj_handle
+
+    @classmethod
+    def _process_magic(cls, options, strict, backends=None):
         if isinstance(options, basestring):
             from .parser import OptsSpec
             try:     ns = get_ipython().user_ns  # noqa
             except:  ns = globals()
             options = OptsSpec.parse(options, ns=ns)
 
-        errmsg = StoreOptions.validation_error_message(options)
+        errmsg = StoreOptions.validation_error_message(options, backends=backends)
         if errmsg:
             sys.stderr.write(errmsg)
             if strict:
-                sys.stderr.write(' Options specification will not be applied.')
+                sys.stderr.write('Options specification will not be applied.')
                 return options, True
         return options, False
 
@@ -122,31 +215,40 @@ class opts(param.ParameterizedFunction):
             return StoreOptions.set_options(obj, options)
 
     @classmethod
-    def _linemagic(cls, options, strict=False):
+    def _linemagic(cls, options, strict=False, backend=None):
         "Deprecated, not expected to be used by any current code"
-        options, failure = cls._process_magic(options, strict)
+        backends = None if backend is None else [backend]
+        options, failure = cls._process_magic(options, strict, backends=backends)
         if failure: return
         with options_policy(skip_invalid=True, warn_on_skip=False):
-            StoreOptions.apply_customizations(options, Store.options())
+            StoreOptions.apply_customizations(options, Store.options(backend=backend))
 
 
     @classmethod
-    def defaults(cls, *options):
-        """
-        Set default options for a session, whether in a Python script or
+    def defaults(cls, *options, **kwargs):
+        """Set default options for a session.
+
+        Set default options for a session. whether in a Python script or
         a Jupyter notebook.
+
+        Args:
+           *options: Option objects used to specify the defaults.
+           backend:  The plotting extension the options apply to
         """
-        cls.linemagic(cls.expand_options(merge_options_to_dict(options)))
+        if kwargs and len(kwargs) != 1 and list(kwargs.keys())[0] != 'backend':
+            raise Exception('opts.defaults only accepts "backend" keyword argument')
+
+        cls._linemagic(cls._expand_options(merge_options_to_dict(options)), backend=kwargs.get('backend'))
 
 
     @classmethod
-    def expand_options(cls, options, backend=None):
+    def _expand_options(cls, options, backend=None):
         """
         Validates and expands a dictionaries of options indexed by
         type[.group][.label] keys into separate style, plot and norm
         options.
 
-            opts.expand_options({'Image': dict(cmap='viridis', show_title=False)})
+            opts._expand_options({'Image': dict(cmap='viridis', show_title=False)})
 
         returns
 
@@ -266,22 +368,55 @@ class opts(param.ParameterizedFunction):
     @classmethod
     def _build_completer(cls, element, allowed):
         def fn(cls, spec=None, **kws):
+            backend = kws.pop('backend', None)
+            if backend:
+                allowed_kws = cls._element_keywords(backend,
+                                                    elements=[element])[element]
+                invalid = set(kws.keys()) - set(allowed_kws)
+            else:
+                allowed_kws = allowed
+                invalid = set(kws.keys()) - set(allowed)
+
             spec = element if spec is None else '%s.%s' % (element, spec)
-            invalid = set(kws.keys()) - set(allowed)
+
+            prefix = None
             if invalid:
                 try:
-                    cls._options_error(list(invalid)[0], element,
-                                       Store.current_backend, allowed)
+                    cls._options_error(list(invalid)[0], element, backend, allowed_kws)
                 except ValueError as e:
                     prefix = 'In opts.{element}(...), '.format(element=element)
                     msg = str(e)[0].lower() + str(e)[1:]
-                raise ValueError(prefix + msg)
+                if prefix:
+                    raise ValueError(prefix + msg)
 
             return Options(spec, **kws)
 
-        kws = ', '.join('{opt}=None'.format(opt=opt) for opt in sorted(allowed))
+        filtered_keywords = [k for k in allowed if k not in cls._no_completion]
+        kws = ', '.join('{opt}=None'.format(opt=opt) for opt in sorted(filtered_keywords))
         fn.__doc__ = '{element}({kws})'.format(element=element, kws=kws)
         return classmethod(fn)
+
+
+    @classmethod
+    def _element_keywords(cls, backend, elements=None):
+        "Returns a dictionary of element names to allowed keywords"
+        if backend not in Store.loaded_backends():
+            return {}
+
+        mapping = {}
+        backend_options = Store.options(backend)
+        elements = elements if elements is not None else backend_options.keys()
+        for element in elements:
+            if '.' in element: continue
+            element = element if isinstance(element, tuple) else (element,)
+            element_keywords = []
+            options = backend_options['.'.join(element)]
+            for group in Options._option_groups:
+                element_keywords.extend(options[group].allowed_keywords)
+
+            mapping[element[0]] = element_keywords
+        return mapping
+
 
     @classmethod
     def _update_backend(cls, backend):
@@ -289,25 +424,16 @@ class opts(param.ParameterizedFunction):
         if cls.__original_docstring__ is None:
             cls.__original_docstring__ = cls.__doc__
 
-        if backend not in Store.loaded_backends():
-            return
-
-        backend_options = Store.options(backend)
         all_keywords = set()
-        for element in backend_options.keys():
-            if '.' in element: continue
-            element_keywords = []
-            options = backend_options['.'.join(element)]
-            for group in Options._option_groups:
-                element_keywords.extend(options[group].allowed_keywords)
-
-            all_keywords |= set(element_keywords)
+        element_keywords = cls._element_keywords(backend)
+        for element, keywords in element_keywords.items():
             with param.logging_level('CRITICAL'):
-                setattr(cls, element[0],
-                        cls._build_completer(element[0],
-                                             element_keywords))
+                all_keywords |= set(keywords)
+                setattr(cls, element,
+                        cls._build_completer(element, keywords))
 
-        kws = ', '.join('{opt}=None'.format(opt=opt) for opt in sorted(all_keywords))
+        filtered_keywords = [k for k in all_keywords if k not in cls._no_completion]
+        kws = ', '.join('{opt}=None'.format(opt=opt) for opt in sorted(filtered_keywords))
         old_doc = cls.__original_docstring__.replace('params(strict=Boolean, name=String)','')
         cls.__doc__ = '\n    opts({kws})'.format(kws=kws) + old_doc
 

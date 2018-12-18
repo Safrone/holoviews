@@ -15,7 +15,7 @@ from ...core import util
 from ...core import (OrderedDict, NdOverlay, DynamicMap, Dataset,
                      CompositeOverlay, Element3D, Element)
 from ...core.options import abbreviated_exception
-from ...element import Graph, Path, Contours
+from ...element import Graph, Path
 from ...util.transform import dim
 from ..plot import GenericElementPlot, GenericOverlayPlot
 from ..util import dynamic_update, process_cmap, color_intervals, dim_range_key
@@ -332,7 +332,8 @@ class ElementPlot(GenericElementPlot, MPLPlot):
 
             if self.invert_xaxis or any(p.invert_xaxis for p in subplots):
                 r, l = l, r
-            if l != r:
+
+            if isinstance(l, util.cftime_types) or l != r:
                 lims = {}
                 if valid_lim(l):
                     lims['left'] = l
@@ -344,7 +345,7 @@ class ElementPlot(GenericElementPlot, MPLPlot):
                     axis.set_xlim(**lims)
             if self.invert_yaxis or any(p.invert_yaxis for p in subplots):
                 t, b = b, t
-            if b != t:
+            if isinstance(b, util.cftime_types) or b != t:
                 lims = {}
                 if valid_lim(b):
                     lims['bottom'] = b
@@ -541,7 +542,7 @@ class ElementPlot(GenericElementPlot, MPLPlot):
 
             if len(v.ops) == 0 and v.dimension in self.overlay_dims:
                 val = self.overlay_dims[v.dimension]
-            elif isinstance(element, Path) and not isinstance(element, Contours):
+            elif type(element) is Path:
                 val = np.concatenate([v.apply(el, ranges=ranges, flat=True)[:-1]
                                       for el in element.split()])
             else:
@@ -590,11 +591,23 @@ class ElementPlot(GenericElementPlot, MPLPlot):
             groups = [sg for sg in style_groups if k.startswith(sg)]
             group = groups[0] if groups else None
             prefix = '' if group is None else group+'_'
+
+            # Check if element supports fill and line style
+            supports_fill = (
+                (prefix != 'edge' or getattr(self, 'filled', True))
+                and any(o.startswith(prefix+'face') for o in self.style_opts))
+
             if k in (prefix+'c', prefix+'color') and isinstance(val, np.ndarray):
                 fill_style = new_style.get(prefix+'facecolor')
                 if fill_style and validate('color', fill_style):
                     new_style.pop('facecolor')
+
                 line_style = new_style.get(prefix+'edgecolor')
+
+                # If glyph has fill and line style is set overriding line color
+                if supports_fill and line_style is not None:
+                    continue
+
                 if line_style and validate('color', line_style):
                     new_style.pop('edgecolor')
             elif k == 'facecolors' and not isinstance(new_style.get('color', new_style.get('c')), np.ndarray):
@@ -681,14 +694,15 @@ class ColorbarPlot(ElementPlot):
 
 
     def _finalize_artist(self, element):
-        artist = self.handles.get('artist', None)
-        if artist and self.colorbar:
-            color_dim = element.get_dimension(getattr(self, 'color_index', None))
-            self._draw_colorbar(color_dim)
+        if self.colorbar:
+            dims = [h for k, h in self.handles.items() if k.endswith('color_dim')]
+            for d in dims:
+                self._draw_colorbar(element, d)
 
 
-    def _draw_colorbar(self, dim=None, redraw=True):
-        element = self.hmap.last
+    def _draw_colorbar(self, element=None, dimension=None, redraw=True):
+        if element is None:
+            element = self.hmap.last
         artist = self.handles.get('artist', None)
         fig = self.handles['fig']
         axis = self.handles['axis']
@@ -705,12 +719,14 @@ class ColorbarPlot(ElementPlot):
             l, b, w, h = position
 
         # Get colorbar label
-        dim = element.get_dimension(dim)
-        if dim:
-            label = dim.pprint_label
+        if isinstance(dimension, dim):
+            dimension = dimension.dimension
+        dimension = element.get_dimension(dimension)
+        if dimension:
+            label = dimension.pprint_label
         elif element.vdims:
             label = element.vdims[0].pprint_label
-        elif dim is None:
+        elif dimension is None:
             label = ''
 
         padding = self.cbar_padding
@@ -721,7 +737,7 @@ class ColorbarPlot(ElementPlot):
             cax = fig.add_axes([l+w+padding+(scaled_w+padding+w*0.15)*offset,
                                 b, scaled_w, h])
             cbar = fig.colorbar(artist, cax=cax, ax=axis, extend=self._cbar_extend)
-            self._adjust_cbar(cbar, label, dim)
+            self._adjust_cbar(cbar, label, dimension)
             self.handles['cax'] = cax
             self.handles['cbar'] = cbar
             ylabel = cax.yaxis.get_label()
@@ -753,6 +769,10 @@ class ColorbarPlot(ElementPlot):
                      element.interface.isscalar(element, vdim.name))
                 )
                 values = np.asarray(element.dimension_values(vdim, expanded=expanded))
+
+        # Store dimension being colormapped for colorbars
+        if prefix+'color_dim' not in self.handles:
+            self.handles[prefix+'color_dim'] = vdim
 
         clim = opts.pop(prefix+'clims', None)
         if clim is None:
@@ -917,7 +937,7 @@ class OverlayPlot(LegendPlot, GenericOverlayPlot):
                           'show_frame', 'show_grid', 'logx', 'logy', 'logz',
                           'xticks', 'yticks', 'zticks', 'xrotation', 'yrotation',
                           'zrotation', 'invert_xaxis', 'invert_yaxis',
-                          'invert_zaxis', 'title_format', 'padding',
+                          'invert_zaxis', 'title', 'title_format', 'padding',
                           'xlabel', 'ylabel', 'zlabel', 'xlim', 'ylim', 'zlim',
                           'xformatter', 'yformatter']
 

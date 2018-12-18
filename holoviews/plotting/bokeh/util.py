@@ -3,6 +3,7 @@ from __future__ import absolute_import, division, unicode_literals
 import re
 import time
 import sys
+import calendar
 import datetime as dt
 
 from collections import defaultdict
@@ -15,6 +16,7 @@ import numpy as np
 from bokeh.core.json_encoder import serialize_json # noqa (API import)
 from bokeh.core.properties import value
 from bokeh.layouts import WidgetBox, Row, Column
+from bokeh.models import tools
 from bokeh.models import Model, ToolbarBox, FactorRange, Range1d, Plot, Spacer, CustomJS
 from bokeh.models.widgets import DataTable, Tabs, Div
 from bokeh.plotting import Figure
@@ -31,12 +33,53 @@ except:
     Chart = type(None) # Create stub for isinstance check
 
 from ...core.overlay import Overlay
-from ...core.util import (LooseVersion, _getargspec, basestring,
-                          callable_name, dt64_to_dt, pd, unique_array)
+from ...core.util import (
+    LooseVersion, _getargspec, basestring, callable_name, cftime_types,
+    cftime_to_timestamp, pd, unique_array)
 from ...core.spaces import get_nested_dmaps, DynamicMap
 from ..util import dim_axis_label
 
 bokeh_version = LooseVersion(bokeh.__version__)  # noqa
+
+
+TOOL_TYPES = {
+    'pan': tools.PanTool,
+    'xpan': tools.PanTool,
+    'ypan': tools.PanTool,
+    'xwheel_pan': tools.WheelPanTool,
+    'ywheel_pan': tools.WheelPanTool,
+    'wheel_zoom': tools.WheelZoomTool,
+    'xwheel_zoom': tools.WheelZoomTool,
+    'ywheel_zoom': tools.WheelZoomTool,
+    'zoom_in': tools.ZoomInTool,
+    'xzoom_in': tools.ZoomInTool,
+    'yzoom_in': tools.ZoomInTool,
+    'zoom_out': tools.ZoomOutTool,
+    'xzoom_out': tools.ZoomOutTool,
+    'yzoom_out': tools.ZoomOutTool,
+    'click': tools.TapTool,
+    'tap': tools.TapTool,
+    'crosshair': tools.CrosshairTool,
+    'box_select': tools.BoxSelectTool,
+    'xbox_select': tools.BoxSelectTool,
+    'ybox_select': tools.BoxSelectTool,
+    'poly_select': tools.PolySelectTool,
+    'lasso_select': tools.LassoSelectTool,
+    'box_zoom': tools.BoxZoomTool,
+    'xbox_zoom': tools.BoxZoomTool,
+    'ybox_zoom': tools.BoxZoomTool,
+    'hover': tools.HoverTool,
+    'save': tools.SaveTool,
+    'undo': tools.UndoTool,
+    'redo': tools.RedoTool,
+    'reset': tools.ResetTool,
+    'help': tools.HelpTool,
+    'box_edit': tools.BoxEditTool,
+    'point_draw': tools.PointDrawTool,
+    'poly_draw': tools.PolyDrawTool,
+    'poly_edit': tools.PolyEditTool,
+    'freehand_draw': tools.FreehandDrawTool
+}
 
 
 def convert_timestamp(timestamp):
@@ -206,10 +249,6 @@ def make_axis(axis, size, factors, dim, flip=False, rotation=0,
     axis.major_label_text_baseline = 'middle'
     axis.update(**axis_props)
     return p
-
-
-def convert_datetime(time):
-    return time.astype('datetime64[s]').astype(float)*1000
 
 
 def hsv_to_rgb(hsv):
@@ -537,15 +576,32 @@ def attach_periodic(plot):
 
 
 def date_to_integer(date):
+    """Converts support date types to milliseconds since epoch
+
+    Attempts highest precision conversion of different datetime
+    formats to milliseconds since the epoch (1970-01-01 00:00:00).
+    If datetime is a cftime with a non-standard calendar the
+    caveats described in hv.core.util.cftime_to_timestamp apply.
+
+    Args:
+        date: Date- or datetime-like object
+
+    Returns:
+        Milliseconds since 1970-01-01 00:00:00
     """
-    Converts datetime types to bokeh's integer format.
-    """
-    if isinstance(date, np.datetime64):
-        date = dt64_to_dt(date)
     if pd and isinstance(date, pd.Timestamp):
-        dt_int = date.timestamp()*1000
-    elif isinstance(date, (dt.datetime, dt.date)):
-        dt_int = time.mktime(date.timetuple())*1000
+        try:
+            date = date.to_datetime64()
+        except:
+            date = date.to_datetime()
+
+    if isinstance(date, np.datetime64):
+        return time.astype('datetime64[ms]').astype(float)
+    elif isinstance(date, cftime_types):
+        return cftime_to_timestamp(date, 'ms')
+
+    if hasattr(date, 'timetuple'):
+        dt_int = calendar.timegm(date.timetuple())*1000
     else:
         raise ValueError('Datetime type not recognized')
     return dt_int

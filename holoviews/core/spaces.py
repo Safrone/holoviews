@@ -16,7 +16,7 @@ from .dimension import OrderedDict, Dimension, ViewableElement, redim
 from .layout import Layout, AdjointLayout, NdLayout, Empty
 from .ndmapping import UniformNdMapping, NdMapping, item_check
 from .overlay import Overlay, CompositeOverlay, NdOverlay, Overlayable
-from .options import Store, StoreOptions
+from .options import Store, StoreOptions, Opts
 from ..streams import Stream
 
 
@@ -34,6 +34,11 @@ class HoloMap(UniformNdMapping, Overlayable):
     """
 
     data_type = (ViewableElement, NdMapping, Layout)
+
+    def __init__(self, initial_items=None, kdims=None, group=None, label=None, **params):
+        super(HoloMap, self).__init__(initial_items, kdims, group, label, **params)
+        self.opts = Opts(self, mode='holomap')
+
 
     def overlay(self, dimensions=None, **kwargs):
         """Group by supplied dimension(s) and overlay each group
@@ -95,36 +100,13 @@ class HoloMap(UniformNdMapping, Overlayable):
         return self.groupby(dimensions, container_type=NdLayout, **kwargs)
 
 
-    def opts(self, options=None, backend=None, clone=True, **kwargs):
-        """
-        Applies options on an object or nested group of objects in a
-        by options group returning a new object with the options
-        applied. If the options are to be set directly on the object a
-        simple format may be used, e.g.:
-
-            obj.opts(style={'cmap': 'viridis'}, plot={'show_title': False})
-
-        If the object is nested the options must be qualified using
-        a type[.group][.label] specification, e.g.:
-
-            obj.opts({'Image': {'plot':  {'show_title': False},
-                                'style': {'cmap': 'viridis}}})
-
-        If no opts are supplied all options on the object will be reset.
-        Disabling clone will modify the object inplace.
-        """
-        data = OrderedDict([(k, v.opts(options, backend, clone, **kwargs))
-                             for k, v in self.data.items()])
-        return self.clone(data)
-
-
     def options(self, *args, **kwargs):
-        """Applies simplified option definition
+        """Applies simplified option definition returning a new object
 
-        Applies options on an object or nested group of objects in a
-        flat format returning a new object with the options
-        applied. If the options are to be set directly on the object a
-        simple format may be used, e.g.:
+        Applies options defined in a flat format to the objects
+        returned by the DynamicMap. If the options are to be set
+        directly on the objects in the HoloMap a simple format may be
+        used, e.g.:
 
             obj.options(cmap='viridis', show_title=False)
 
@@ -554,21 +536,25 @@ class HoloMap(UniformNdMapping, Overlayable):
             AdjointLayout of HoloMap and histograms or just the
             histograms
         """
-        histmaps = [self.clone(shared_data=False) for _ in
-                    kwargs.get('dimension', range(1))]
+        if dimension is not None and not isinstance(dimension, list):
+            dimension = [dimension]
+        histmaps = [self.clone(shared_data=False) for _ in (dimension or [None])]
 
         if individually:
             map_range = None
         else:
-            if 'dimension' not in kwargs:
+            if dimension is None:
                 raise Exception("Please supply the dimension to compute a histogram for.")
             map_range = self.range(kwargs['dimension'])
+
         bin_range = map_range if bin_range is None else bin_range
         style_prefix = 'Custom[<' + self.name + '>]_'
         if issubclass(self.type, (NdOverlay, Overlay)) and 'index' not in kwargs:
             kwargs['index'] = 0
+
         for k, v in self.data.items():
-            hists = v.hist(adjoin=False, bin_range=bin_range, num_bins=num_bins,
+            hists = v.hist(adjoin=False, dimension=dimension,
+                           bin_range=bin_range, num_bins=num_bins,
                            style_prefix=style_prefix, **kwargs)
             if isinstance(hists, Layout):
                 for i, hist in enumerate(hists):
@@ -940,6 +926,8 @@ class DynamicMap(HoloMap):
 
         super(DynamicMap, self).__init__(initial_items, callback=callback, streams=valid, **params)
 
+        self.opts = Opts(self, mode='dynamicmap')
+
         if self.callback.noargs:
             prefix = 'DynamicMaps using generators (or callables without arguments)'
             if self.kdims:
@@ -1100,57 +1088,13 @@ class DynamicMap(HoloMap):
         return self._style(retval)
 
 
-    def opts(self, options=None, backend=None, clone=True, **kwargs):
-        """Applies nested options definition
-
-        Applies options on an object or nested group of objects in a
-        by options group returning a new object with the options
-        applied. If the options are to be set directly on the object a
-        simple format may be used, e.g.:
-
-            obj.opts(style={'cmap': 'viridis'}, plot={'show_title': False})
-
-        If the object is nested the options must be qualified using
-        a type[.group][.label] specification, e.g.:
-
-            obj.opts({'Image': {'plot':  {'show_title': False},
-                                'style': {'cmap': 'viridis}}})
-
-        If no opts are supplied all options on the object will be reset.
-
-        Args:
-            options (dict): Options specification
-                Options specification should be indexed by
-                type[.group][.label] or option type ('plot', 'style',
-                'norm').
-            backend (optional): Backend to apply options to
-                Defaults to current selected backend
-            clone (bool, optional): Whether to clone object
-                Options can be applied inplace with clone=False
-            **kwargs: Keywords of options by type
-                Applies options directly to the object by type
-                (e.g. 'plot', 'style', 'norm') specified as
-                dictionaries.
-
-        Returns:
-            Returns the cloned object with the options applied
-        """
-        from ..util import Dynamic
-        dmap = Dynamic(self, operation=lambda obj, **dynkwargs: obj.opts(options, backend,
-                                                                         clone, **kwargs),
-                       streams=self.streams, link_inputs=True)
-        dmap.data = OrderedDict([(k, v.opts(options, **kwargs))
-                                 for k, v in self.data.items()])
-        return dmap
-
-
     def options(self, *args, **kwargs):
-        """Applies simplified option definition
+        """Applies simplified option definition returning a new object.
 
-        Applies options on an object or nested group of objects in a
-        flat format returning a new object with the options
-        applied. If the options are to be set directly on the object a
-        simple format may be used, e.g.:
+        Applies options defined in a flat format to the objects
+        returned by the DynamicMap. If the options are to be set
+        directly on the objects returned by the DynamicMap a simple
+        format may be used, e.g.:
 
             obj.options(cmap='viridis', show_title=False)
 
@@ -1179,21 +1123,9 @@ class DynamicMap(HoloMap):
         Returns:
             Returns the cloned object with the options applied
         """
-        from ..util import Dynamic
-        clone = kwargs.get('clone', True)
-
-        obj = self if clone else self.clone()
-        dmap = Dynamic(obj, operation=lambda obj, **dynkwargs: obj.options(*args, **kwargs),
-                       streams=self.streams, link_inputs=True)
-        if not clone:
-            with util.disable_constant(self):
-                self.callback = dmap.callback
-            self.callback.inputs[:] = [obj]
-            obj.callback.inputs[:] = []
-            dmap = self
-        dmap.data = OrderedDict([(k, v.options(*args, **kwargs))
-                                 for k, v in self.data.items()])
-        return dmap
+        if 'clone' not in kwargs:
+            kwargs['clone'] = True
+        return self.opts(*args, **kwargs)
 
 
     def clone(self, data=None, shared_data=True, new_type=None, link=True,

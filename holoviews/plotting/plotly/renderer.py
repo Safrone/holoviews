@@ -1,3 +1,6 @@
+from __future__ import absolute_import, division, unicode_literals
+
+import base64
 import json
 
 import param
@@ -5,7 +8,7 @@ with param.logging_level('CRITICAL'):
     from plotly.offline.offline import utils, get_plotlyjs, init_notebook_mode
     import plotly.graph_objs as go
 
-from ..renderer import Renderer, MIME_TYPES
+from ..renderer import Renderer, MIME_TYPES, HTML_TAGS
 from ...core.options import Store
 from ...core import HoloMap
 from .widgets import PlotlyScrubberWidget, PlotlySelectionWidget
@@ -25,25 +28,16 @@ plotly.relayout(plot, data.layout);
 plotly.redraw(plot);
 """
 
-PLOTLY_WARNING = """
-<div class="alert alert-warning">
-The plotly backend is experimental, and is
-not supported at this time.  If you would like to volunteer to help
-maintain this backend by adding documentation, responding to user
-issues, keeping the backend up to date as other code changes, or by
-adding support for other elements, please email holoviews@gmail.com
-</div>
-"""
 
 class PlotlyRenderer(Renderer):
 
     backend = param.String(default='plotly', doc="The backend name.")
 
-    fig = param.ObjectSelector(default='auto', objects=['html', 'json', 'auto'], doc="""
+    fig = param.ObjectSelector(default='auto', objects=['html', 'json', 'png', 'svg', 'auto'], doc="""
         Output render format for static figures. If None, no figure
         rendering will occur. """)
 
-    mode_formats = {'fig': {'default': ['html', 'json']},
+    mode_formats = {'fig': {'default': ['html', 'png', 'svg', 'json']},
                     'holomap': {'default': ['widgets', 'scrubber', 'auto']}}
 
     widgets = {'scrubber': PlotlyScrubberWidget,
@@ -61,8 +55,8 @@ class PlotlyRenderer(Renderer):
 
         if isinstance(plot, tuple(self.widgets.values())):
             return plot(), mime_types
-        elif fmt == 'html':
-            return self._figure_data(plot, divuuid=divuuid), mime_types
+        elif fmt in ('html', 'png', 'svg'):
+            return self._figure_data(plot, fmt, divuuid=divuuid), mime_types
         elif fmt == 'json':
             return self.diff(plot), mime_types
 
@@ -83,6 +77,19 @@ class PlotlyRenderer(Renderer):
         # Wrapping plot.state in go.Figure here performs validation
         # and applies any default theme.
         figure = go.Figure(plot.state)
+
+        if fmt in ('png', 'svg'):
+            import plotly.io as pio
+            data = pio.to_image(figure, fmt)
+            if as_script:
+                b64 = base64.b64encode(data).decode("utf-8")
+                (mime_type, tag) = MIME_TYPES[fmt], HTML_TAGS[fmt]
+                src = HTML_TAGS['base64'].format(mime_type=mime_type, b64=b64)
+                div = tag.format(src=src, mime_type=mime_type, css='')
+                js = ''
+                return div, js
+            return data
+
         if divuuid is None:
             divuuid = plot.id
 
@@ -142,10 +149,8 @@ class PlotlyRenderer(Renderer):
         """
         Loads the plotly notebook resources.
         """
-        from IPython.display import display, HTML, publish_display_data
-        if not cls._loaded:
-            display(HTML(PLOTLY_WARNING))
-            cls._loaded = True
+        from IPython.display import publish_display_data
+        cls._loaded = True
         init_notebook_mode(connected=not inline)
         publish_display_data(data={MIME_TYPES['jlab-hv-load']:
                                    get_plotlyjs()})

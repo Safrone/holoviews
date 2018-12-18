@@ -15,7 +15,6 @@ from .dimension import OrderedDict, Dimension, Dimensioned, ViewableElement, asd
 from .util import (config, unique_iterator, sanitize_identifier, dimension_sort,
                    basestring, wrap_tuple, process_ellipses, get_ndmapping_label)
 
-
 class item_check(object):
     """
     Context manager to allow creating NdMapping types without
@@ -132,7 +131,9 @@ class MultiDimensionalMapping(Dimensioned):
         they are inserted ensuring that they are of a certain
         type. Subclassed may implement further element restrictions.
         """
-        if self.data_type is not None and not isinstance(data, self.data_type):
+        if not self._check_items:
+            return
+        elif self.data_type is not None and not isinstance(data, self.data_type):
             if isinstance(self.data_type, tuple):
                 data_type = tuple(dt.__name__ for dt in self.data_type)
             else:
@@ -650,7 +651,7 @@ class NdMapping(MultiDimensionalMapping):
             return self.data[()]
         elif indexslice in [Ellipsis, ()]:
             return self
-        elif Ellipsis in wrap_tuple(indexslice):
+        elif any(Ellipsis is sl for sl in wrap_tuple(indexslice)):
             indexslice = process_ellipses(self, indexslice)
 
         map_slice, data_slice = self._split_index(indexslice)
@@ -810,7 +811,6 @@ class UniformNdMapping(NdMapping):
         self._label_check, self.label = None, label
         super(UniformNdMapping, self).__init__(initial_items, kdims=kdims, **params)
 
-
     def clone(self, data=None, shared_data=True, new_type=None, link=True,
               *args, **overrides):
         """Clones the object, overriding data and parameters.
@@ -883,7 +883,7 @@ class UniformNdMapping(NdMapping):
         for key, element in self.data.items():
             df = element.dframe(inner_dimensions, multi_index)
             names = [d.name for d in outer_dimensions]
-            key_dims = [(d, key[i]) for d, i in inds]
+            key_dims = [(d.name, key[i]) for d, i in inds]
             if multi_index:
                 length = len(df)
                 indexes = [[v]*length for _, v in key_dims]
@@ -957,7 +957,9 @@ class UniformNdMapping(NdMapping):
 
 
     def _item_check(self, dim_vals, data):
-        if self.type is not None and (type(data) != self.type):
+        if not self._check_items:
+            return
+        elif self.type is not None and (type(data) != self.type):
             raise AssertionError("%s must only contain one type of object, not both %s and %s." %
                                  (self.__class__.__name__, type(data).__name__, self.type.__name__))
         super(UniformNdMapping, self)._item_check(dim_vals, data)

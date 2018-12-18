@@ -10,9 +10,10 @@ import bokeh.plotting
 
 from bokeh.core.properties import value
 from bokeh.document.events import ModelChangedEvent
-from bokeh.models import (HoverTool, Renderer, Range1d, DataRange1d, Title,
-                          FactorRange, FuncTickFormatter, Tool, Legend,
-                          TickFormatter, PrintfTickFormatter)
+from bokeh.models import tools
+from bokeh.models import (
+    Renderer, Range1d, DataRange1d, Title, FactorRange, Legend,
+    FuncTickFormatter, TickFormatter, PrintfTickFormatter)
 from bokeh.models.tickers import Ticker, BasicTicker, FixedTicker, LogTicker
 from bokeh.models.widgets import Panel, Tabs
 from bokeh.models.mappers import LinearColorMapper
@@ -32,20 +33,27 @@ from ...streams import Buffer
 from ...util.transform import dim
 from ..plot import GenericElementPlot, GenericOverlayPlot
 from ..util import dynamic_update, process_cmap, color_intervals, dim_range_key
-from .plot import BokehPlot, TOOLS
+from .plot import BokehPlot
 from .styles import (
     legend_dimensions, line_properties, mpl_to_bokeh, property_prefixes,
     rgba_tuple, text_properties, validate
 )
 from .util import (
-    bokeh_version, decode_bytes, get_tab_title, glyph_order,
-    py2js_tickformatter, recursive_model_update, theme_attr_json,
-    cds_column_replace, hold_policy, match_dim_specs
+    TOOL_TYPES, bokeh_version, date_to_integer, decode_bytes,
+    get_tab_title, glyph_order, py2js_tickformatter,
+    recursive_model_update, theme_attr_json, cds_column_replace,
+    hold_policy, match_dim_specs
 )
 
 
 
 class ElementPlot(BokehPlot, GenericElementPlot):
+
+    active_tools = param.List(default=[], doc="""
+        Allows specifying which tools are active by default. Note
+        that only one tool per gesture type can be active, e.g.
+        both 'pan' and 'box_zoom' are drag tools, so if both are
+        listed only the last one will be active.""")
 
     border = param.Number(default=10, doc="""
         Minimum border around plot.""")
@@ -168,26 +176,27 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                 if handle and handle in known_tools:
                     tool_names.append(handle)
                     if handle == 'hover':
-                        tool = HoverTool(tooltips=tooltips, **hover_opts)
+                        tool = tools.HoverTool(tooltips=tooltips, **hover_opts)
                         hover = tool
                     else:
                         tool = known_tools[handle]()
                     cb_tools.append(tool)
                     self.handles[handle] = tool
 
-        tools = [t for t in cb_tools + self.default_tools + self.tools
-                 if t not in tool_names]
+        tool_list = [
+            t for t in cb_tools + self.default_tools + self.tools
+            if t not in tool_names]
 
         copied_tools = []
-        for tool in tools:
-            if isinstance(tool, Tool):
+        for tool in tool_list:
+            if isinstance(tool, tools.Tool):
                 properties = tool.properties_with_values(include_defaults=False)
                 tool = type(tool)(**properties)
             copied_tools.append(tool)
 
-        hover_tools = [t for t in copied_tools if isinstance(t, HoverTool)]
+        hover_tools = [t for t in copied_tools if isinstance(t, tools.HoverTool)]
         if 'hover' in copied_tools:
-            hover = HoverTool(tooltips=tooltips, **hover_opts)
+            hover = tools.HoverTool(tooltips=tooltips, **hover_opts)
             copied_tools[copied_tools.index('hover')] = hover
         elif any(hover_tools):
             hover = hover_tools[0]
@@ -248,7 +257,10 @@ class ElementPlot(BokehPlot, GenericElementPlot):
         and to link axes.
         """
         dims = element.dimensions()[:2]
-        return dims+[None] if len(dims) < 2 else dims
+        if len(dims) == 1:
+            return dims + [None, None]
+        else:
+            return dims + [None]
 
 
     def _axes_props(self, plots, subplots, element, ranges):
@@ -301,7 +313,7 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                     xtype = el.nodes.get_dimension_type(xdims[0])
                 else:
                     xtype = el.get_dimension_type(xdims[0])
-                if ((xtype is np.object_ and type(l) in util.datetime_types) or
+                if ((xtype is np.object_ and issubclass(type(l), util.datetime_types)) or
                     xtype in util.datetime_types):
                     x_axis_type = 'datetime'
 
@@ -315,7 +327,7 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                     ytype = el.nodes.get_dimension_type(ydims[0])
                 else:
                     ytype = el.get_dimension_type(ydims[0])
-                if ((ytype is np.object_ and type(b) in util.datetime_types)
+                if ((ytype is np.object_ and issubclass(type(b), util.datetime_types))
                     or ytype in util.datetime_types):
                     y_axis_type = 'datetime'
 
@@ -406,6 +418,29 @@ class ElementPlot(BokehPlot, GenericElementPlot):
         for lod_prop, v in lod.items():
             plot_props['lod_'+lod_prop] = v
         return plot_props
+
+
+    def _set_active_tools(self, plot):
+        "Activates the list of active tools"
+        for tool in self.active_tools:
+            if isinstance(tool, util.basestring):
+                tool_type = TOOL_TYPES[tool]
+                matching = [t for t in plot.toolbar.tools
+                            if isinstance(t, tool_type)]
+                if not matching:
+                    self.param.warning('Tool of type %r could not be found '
+                                       'and could not be activated by default.'
+                                       % tool)
+                    continue
+                tool = matching[0]
+            if isinstance(tool, tools.Drag):
+                plot.toolbar.active_drag = tool
+            if isinstance(tool, tools.Scroll):
+                plot.toolbar.active_scroll = tool
+            if isinstance(tool, tools.Tap):
+                plot.toolbar.active_tap = tool
+            if isinstance(tool, tools.Inspection):
+                plot.toolbar.active_inspect.append(tool)
 
 
     def _title_properties(self, key, plot, element):
@@ -606,7 +641,9 @@ class ElementPlot(BokehPlot, GenericElementPlot):
 
     def _update_range(self, axis_range, low, high, factors, invert, shared, log, streaming=False):
         if isinstance(axis_range, (Range1d, DataRange1d)) and self.apply_ranges:
-            if (low == high and low is not None):
+            if isinstance(low, util.cftime_types):
+                pass
+            elif (low == high and low is not None):
                 if isinstance(low, util.datetime_types):
                     offset = np.timedelta64(500, 'ms')
                     low -= offset
@@ -636,6 +673,8 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                 if reset_supported:
                     updates['reset_end'] = updates['end']
             for k, (old, new) in updates.items():
+                if isinstance(new, util.cftime_types):
+                    new = date_to_integer(new)
                 axis_range.update(**{k:new})
                 if streaming and not k.startswith('reset_'):
                     axis_range.trigger(k, old, new)
@@ -706,7 +745,7 @@ class ElementPlot(BokehPlot, GenericElementPlot):
         return renderer, renderer.glyph
 
 
-    def _apply_transforms(self, element, source, ranges, style, group=None):
+    def _apply_transforms(self, element, data, ranges, style, group=None):
         new_style = dict(style)
         prefix = group+'_' if group else ''
         for k, v in dict(style).items():
@@ -750,7 +789,7 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                                      'to overlay your data along the dimension.'.format(
                                          style=k, dim=v.dimension, element=element,
                                          backend=self.renderer.backend))
-                elif source.data and len(val) != len(list(source.data.values())[0]):
+                elif data and len(val) != len(list(data.values())[0]):
                     if isinstance(element, VectorField):
                         val = np.tile(val, 3)
                     else:
@@ -767,7 +806,7 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                 key = val
             else:
                 key = {'field': k}
-                source.data[k] = val
+                data[k] = val
 
             # If color is not valid colorspec add colormapper
             numeric = isinstance(val, np.ndarray) and val.dtype.kind in 'uifMm'
@@ -792,7 +831,7 @@ class ElementPlot(BokehPlot, GenericElementPlot):
         # Process color/alpha styles and expand to fill/line style
         for style, val in list(new_style.items()):
             for s in ('alpha', 'color'):
-                if prefix+s != style or style not in source.data or validate(s, val, True):
+                if prefix+s != style or style not in data or validate(s, val, True):
                     continue
                 supports_fill = any(
                     o.startswith(prefix+'fill') and (prefix != 'edge_' or getattr(self, 'filled', True))
@@ -823,21 +862,18 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                     if ((line_style is not None and (validate(s, line_style) and not hover)) or
                         (line_style is None and not supports_fill)):
                         new_style[line_key] = val
-
         return new_style
 
 
     def _glyph_properties(self, plot, element, source, ranges, style, group=None):
-        with abbreviated_exception():
-            new_style = self._apply_transforms(element, source, ranges, style, group)
-        properties = dict(new_style, source=source)
+        properties = dict(style, source=source)
         if self.show_legend:
             if self.overlay_dims:
                 legend = ', '.join([d.pprint_value(v) for d, v in
                                     self.overlay_dims.items()])
             else:
                 legend = element.label
-            if legend:
+            if legend and self.overlaid:
                 properties['legend'] = value(legend)
         return properties
 
@@ -950,6 +986,10 @@ class ElementPlot(BokehPlot, GenericElementPlot):
             style = self.style[self.cyclic_index]
             data, mapping, style = self.get_data(element, ranges, style)
             current_id = element._plot_id
+
+        with abbreviated_exception():
+            style = self._apply_transforms(element, data, ranges, style)
+
         if source is None:
             source = self._init_datasource(data)
         self.handles['previous_id'] = current_id
@@ -1006,6 +1046,7 @@ class ElementPlot(BokehPlot, GenericElementPlot):
             cb.initialize()
 
         if not self.overlaid:
+            self._set_active_tools(plot)
             self._process_legend()
         self._execute_hooks(element)
 
@@ -1032,6 +1073,9 @@ class ElementPlot(BokehPlot, GenericElementPlot):
             data, mapping, style = self.get_batched_data(element, ranges)
         else:
             data, mapping, style = self.get_data(element, ranges, style)
+
+        with abbreviated_exception():
+            style = self._apply_transforms(element, data, ranges, style)
 
         if glyph:
             properties = self._glyph_properties(plot, element, source, ranges, style)
@@ -1083,6 +1127,7 @@ class ElementPlot(BokehPlot, GenericElementPlot):
         if not self.overlaid:
             self._update_ranges(style_element, ranges)
             self._update_plot(key, plot, style_element)
+            self._set_active_tools(plot)
 
         self._update_glyphs(element, ranges, self.style[self.cyclic_index])
         self._execute_hooks(element)
@@ -1144,15 +1189,17 @@ class CompositeElementPlot(ElementPlot):
         current_id = element._plot_id
         self.handles['previous_id'] = current_id
         for key in keys:
+            style_group = self._style_groups.get('_'.join(key.split('_')[:-1]))
+            group_style = dict(style)
             ds_data = data.get(key, {})
+            with abbreviated_exception():
+                group_style = self._apply_transforms(element, ds_data, ranges, group_style, style_group)
             if id(ds_data) in source_cache:
                 source = source_cache[id(ds_data)]
             else:
                 source = self._init_datasource(ds_data)
                 source_cache[id(ds_data)] = source
             self.handles[key+'_source'] = source
-            group_style = dict(style)
-            style_group = self._style_groups.get('_'.join(key.split('_')[:-1]))
             properties = self._glyph_properties(plot, element, source, ranges, group_style, style_group)
             properties = self._process_properties(key, properties, mapping.get(key, {}))
 
@@ -1208,6 +1255,8 @@ class CompositeElementPlot(ElementPlot):
             if glyph:
                 group_style = dict(style)
                 style_group = self._style_groups.get('_'.join(key.split('_')[:-1]))
+                with abbreviated_exception():
+                    group_style = self._apply_transforms(element, gdata, ranges, group_style, style_group)
                 properties = self._glyph_properties(plot, element, source, ranges, group_style, style_group)
                 properties = self._process_properties(key, properties, mapping[key])
                 renderer = self.handles.get(key+'_glyph_renderer')
@@ -1560,10 +1609,10 @@ class OverlayPlot(GenericOverlayPlot, LegendPlot):
                           'show_grid', 'logx', 'logy', 'xticks', 'toolbar',
                           'yticks', 'xrotation', 'yrotation', 'lod',
                           'border', 'invert_xaxis', 'invert_yaxis', 'sizing_mode',
-                          'title_format', 'legend_position', 'legend_offset',
+                          'title', 'title_format', 'legend_position', 'legend_offset',
                           'legend_cols', 'gridstyle', 'legend_muted', 'padding',
                           'xlabel', 'ylabel', 'xlim', 'ylim', 'zlim',
-                          'xformatter', 'yformatter']
+                          'xformatter', 'yformatter', 'active_tools']
 
     def __init__(self, overlay, **params):
         super(OverlayPlot, self).__init__(overlay, **params)
@@ -1677,19 +1726,18 @@ class OverlayPlot(GenericOverlayPlot, LegendPlot):
         """
         Processes the list of tools to be supplied to the plot.
         """
-        tools = []
         hover_tools = {}
-        tool_types = []
+        init_tools, tool_types = [], []
         for key, subplot in self.subplots.items():
             el = element.get(key)
             if el is not None:
                 el_tools = subplot._init_tools(el, self.callbacks)
                 for tool in el_tools:
                     if isinstance(tool, util.basestring):
-                        tool_type = TOOLS.get(tool)
+                        tool_type = TOOL_TYPES.get(tool)
                     else:
                         tool_type = type(tool)
-                    if isinstance(tool, HoverTool):
+                    if isinstance(tool, tools.HoverTool):
                         tooltips = tuple(tool.tooltips) if tool.tooltips else ()
                         if tooltips in hover_tools:
                             continue
@@ -1699,9 +1747,9 @@ class OverlayPlot(GenericOverlayPlot, LegendPlot):
                         continue
                     else:
                         tool_types.append(tool_type)
-                    tools.append(tool)
+                    init_tools.append(tool)
         self.handles['hover_tools'] = hover_tools
-        return tools
+        return init_tools
 
 
     def _merge_tools(self, subplot):
@@ -1791,6 +1839,7 @@ class OverlayPlot(GenericOverlayPlot, LegendPlot):
             self.handles['plot'] = Tabs(tabs=panels)
         elif not self.overlaid:
             self._process_legend()
+            self._set_active_tools(plot)
         self.drawn = True
         self.handles['plots'] = plots
 
@@ -1880,7 +1929,9 @@ class OverlayPlot(GenericOverlayPlot, LegendPlot):
                 self._process_legend()
 
         if element and not self.overlaid and not self.tabs and not self.batched:
-            self._update_plot(key, self.handles['plot'], element)
+            plot = self.handles['plot']
+            self._update_plot(key, plot, element)
+            self._set_active_tools(plot)
 
         self._process_legend()
 
